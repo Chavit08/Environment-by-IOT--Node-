@@ -1,0 +1,191 @@
+#include <ESP8266WiFi.h>    
+#include <ESP8266WebServer.h>
+#include <WiFiManager.h>    
+#include <MicroGear.h>
+#include "DHT.h"
+#include "TinyGPS++.h"
+#include <SimpleTimer.h>
+#include <MCP3008.h>
+#include <math.h>
+
+const char* ssid     = "Chavit_2.4G";
+const char* password = "023381484";
+
+#define APPID   "PJenv"
+#define KEY     "XTvPvQlgiM2aR2N"
+#define SECRET  "BWp2u3UxhISEMi5SZcBSzgDOc"
+#define ALIAS   "NodeMCU"
+
+WiFiClient client;
+MicroGear microgear(client);
+
+#define DHTPIN D2
+#define DHTTYPE DHT22
+DHT dht(DHTPIN, DHTTYPE);
+float t,h;
+
+int dustPin=A0;
+int leddust=D3;
+int samplingTime = 280;
+int deltaTime = 40;
+int sleepTime = 9680;
+float voMeasured=0.0;
+float calcVoltage=0.0;
+float dustDensity=0.0;
+
+float R0;
+float ratio;
+int gasppm;
+
+TinyGPSPlus gps;
+SimpleTimer timer;
+
+String data;
+
+#define D0 16          
+#define ledPin  D0      
+#define ESP_AP_NAME "Environment by iot"
+
+#define CS_PIN D8
+#define CLOCK_PIN D5
+#define MOSI_PIN D7
+#define MISO_PIN D6
+MCP3008 adc(CLOCK_PIN, MOSI_PIN, MISO_PIN, CS_PIN);
+
+void setup() 
+{
+  Serial.begin(9600);
+  pinMode(ledPin, OUTPUT);
+  pinMode(leddust,OUTPUT);
+  dht.begin();
+  wifi();
+  netpie();
+  calibrate_gas();
+  timer.setInterval(1000, readsensor);  //read data every 1 sec
+  timer.setInterval(2000, senddata);  //send data every 2 sec
+}
+
+void loop() 
+{   
+  timer.run();
+  if (microgear.connected())
+  { 
+    microgear.loop(); 
+  }
+  else 
+  {
+    Serial.println("connection lost, reconnect...");
+    microgear.connect(APPID);
+  }
+  encodeGPS();
+}
+
+void readsensor(){
+  sensorDHT();
+  sensorGas();
+  sensorDust(); 
+}
+
+void senddata(){
+  microgear.publish("/Temp",t,0);
+  microgear.publish("/Hum",h,0);
+  microgear.publish("/Gas",gasppm);
+  microgear.publish("/Dust",dustDensity,0); 
+  microgear.publish("/Lat",gps.location.lat(),6);
+  microgear.publish("/Long",gps.location.lng(),6);
+}
+
+
+void wifi()
+{
+  digitalWrite(ledPin,LOW);
+  //WiFiManager wifiManager;
+  //wifiManager.autoConnect(ESP_AP_NAME); 
+  //while (WiFi.status() != WL_CONNECTED) 
+  //{
+     //delay(250);
+     //Serial.print(".");
+  //}
+  //Serial.println("WiFi connected");  
+  //Serial.println("IP address: ");
+  //Serial.println(WiFi.localIP());
+  //digitalWrite(ledPin,HIGH);
+  WiFi.begin(ssid, password);
+   while (WiFi.status() != WL_CONNECTED) 
+   {
+      delay(250);
+      Serial.print(".");
+   }
+
+   Serial.println("WiFi connected");  
+   digitalWrite(ledPin,HIGH);
+}
+
+void netpie()
+{
+  microgear.on(CONNECTED,onConnected);
+  microgear.init(KEY,SECRET,ALIAS);
+  microgear.connect(APPID);
+  Serial.println("connected");
+}
+
+void onConnected(char *attribute, uint8_t* msg, unsigned int msglen) 
+{
+  Serial.println("Connected to NETPIE...");
+  microgear.setAlias(ALIAS);
+}
+
+void encodeGPS()
+{
+  while(Serial.available())//While there are characters to come from the GPS
+  {
+  gps.encode(Serial.read());//This feeds the serial NMEA data into the library one char at a time
+  }
+}
+
+void sensorDHT()
+{
+  t = dht.readTemperature(); 
+  h = dht.readHumidity(); 
+}
+
+void sensorGas()
+{
+    float sensor_volt;
+    float RS_gas; // Get value of RS in a GAS
+    int sensorValue = adc.readADC(1);
+    sensor_volt=(float)sensorValue/1024*3.3;
+    RS_gas = (3.3-sensor_volt)/sensor_volt; // omit *RL
+    ratio = RS_gas/R0;  // ratio = RS/R0
+    gasppm= pow(10,(log10(ratio)*-2.037)+2.796);
+    if( gasppm > 10000){
+    gasppm=10000;
+    }
+    
+}
+
+void calibrate_gas(){
+    float sensor_volt;
+    float RS_air; 
+    float sensorValue=0;
+    for(int x = 0 ; x < 100 ; x++)
+    {
+        sensorValue = sensorValue + adc.readADC(1);
+    }
+    sensorValue = sensorValue/100.0;
+    sensor_volt = sensorValue/1024*3.3;
+    RS_air = (3.3-sensor_volt)/sensor_volt;
+    R0 = RS_air/9.8; 
+}
+
+void sensorDust(){
+  digitalWrite(leddust, LOW); // power on the LED
+  delayMicroseconds(samplingTime);
+  voMeasured = analogRead(dustPin); // read the dust value
+  delayMicroseconds(deltaTime);
+  digitalWrite(leddust, HIGH); // turn the LED off
+  delayMicroseconds(sleepTime);
+  calcVoltage = voMeasured * (3.3 / 1024);
+  dustDensity = (0.17 * calcVoltage) * 1000;
+}
+
